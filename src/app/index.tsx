@@ -12,6 +12,7 @@ import {
   TouchableOpacity,
   View
 } from 'react-native';
+import { PieChart } from 'react-native-gifted-charts';
 import { api } from '../services/api';
 
 interface Transacao {
@@ -28,8 +29,30 @@ export default function HomeScreen() {
   const [salvando, setSalvando] = useState(false);
 
   // Lista dinâmica de categorias criadas pelo utilizador
-  const [categorias, setCategorias] = useState<string[]>(['Geral']);
-  const [categoriaSelecionada, setCategoriaSelecionada] = useState('Geral');
+  interface CategoriaItem {
+    id: number;
+    nome: string;
+  }
+
+  interface ResumoMes {
+    ano: number;
+    mes: number;
+    receitas: number;
+    despesas: number;
+    saldo: number;
+    despesasMesAnterior: number;
+    diferencaDespesas: number;
+    gastosPorCategoria: {
+      categoria: string;
+      total: number;
+    }[];
+  }
+
+  const [categorias, setCategorias] = useState<CategoriaItem[]>([]);
+  const [categoriaSelecionada, setCategoriaSelecionada] = useState<CategoriaItem | null>(null);
+
+  const [resumo, setResumo] = useState<ResumoMes | null>(null);
+  const [categoriaFiltroGrafico, setCategoriaFiltroGrafico] = useState<string | null>(null);
 
   // Controlo do modal para adicionar nova categoria
   const [modalVisible, setModalVisible] = useState(false);
@@ -40,11 +63,21 @@ export default function HomeScreen() {
   const [valor, setValor] = useState('');
   const [tipo, setTipo] = useState<'RECEITA' | 'DESPESA'>('DESPESA');
 
-  async function carregarDados() {
+async function carregarDados() {
     try {
       setLoading(true);
-      const response = await api.get('/transacoes');
-      setTransacoes(response.data);
+      const [resTransacoes, resCategorias, resDashboard] = await Promise.all([
+        api.get('/transacoes'),
+        api.get('/categorias'),
+        api.get('/dashboard/resumo-mes'),
+      ]);
+      setTransacoes(resTransacoes.data);
+      setCategorias(resCategorias.data);
+      setResumo(resDashboard.data);
+
+      if (resCategorias.data.length > 0 && !categoriaSelecionada) {
+        setCategoriaSelecionada(resCategorias.data[0]);
+      }
     } catch (error) {
       console.log('Erro ao carregar dados:', error);
       Alert.alert('Erro', 'Não foi possível ligar ao backend.');
@@ -57,22 +90,30 @@ export default function HomeScreen() {
     carregarDados();
   }, []);
 
-  function handleAdicionarCategoria() {
+  async function handleAdicionarCategoria() {
     const nomeLimpo = novaCategoria.trim();
     if (!nomeLimpo) {
       Alert.alert('Aviso', 'Indique um nome para a categoria.');
       return;
     }
 
-    if (categorias.some(c => c.toLowerCase() === nomeLimpo.toLowerCase())) {
+    if (categorias.some(c => c.nome.toLocaleUpperCase() === nomeLimpo.toLocaleLowerCase())) {
       Alert.alert('Aviso', 'Essa categoria já existe.');
       return;
     }
 
-    setCategorias(prev => [...prev, nomeLimpo]);
-    setCategoriaSelecionada(nomeLimpo);
-    setNovaCategoria('');
-    setModalVisible(false);
+    try {
+      const response = await api.post('/categorias', { nome: nomeLimpo});
+      const novaCatSalva: CategoriaItem = response.data;
+
+      setCategorias(prev => [...prev, novaCatSalva]);
+      setCategoriaSelecionada(novaCatSalva);
+      setNovaCategoria('');
+      setModalVisible(false);
+    } catch (error) {
+      console.log('Erro ao criar categoria:', error);
+      Alert.alert('Erro', 'Não foi possivel salvar a categoria no backend.');
+    }
   }
 
   async function handleSalvar() {
@@ -91,12 +132,12 @@ export default function HomeScreen() {
       const dataHoje = new Date().toISOString().split('T')[0];
 
     const novaTransacao = {
-      descricao: `[${categoriaSelecionada}] ${descricao.trim()}`,
+      descricao: `[${categoriaSelecionada?.nome || 'Geral'}] ${descricao.trim()}`,
       valor: valorNumerico,
       tipo: tipo,
       data: dataHoje,
       categoria: {
-        id: 1 // Associa à categoria de ID 1 cadastrada no banco
+        id: categoriaSelecionada?.id
       }
     };
 
@@ -108,7 +149,7 @@ export default function HomeScreen() {
       carregarDados();
     } catch (error: any) {
       console.log('Status do erro:', error.response?.status);
-      console.log('Dados do Erro Backend:', error.response?.data);
+      console.log('Dados do Erro Backend:', JSON.stringify(error.response?.data, null, 2));
       Alert.alert('Erro', 'Falha ao guardar no backend.');
     } finally {
       setSalvando(false);
@@ -124,6 +165,26 @@ export default function HomeScreen() {
     .reduce((acc, t) => acc + t.valor, 0);
 
   const saldoTotal = totalReceitas - totalDespesas;
+
+  const coresGrafico = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899'];
+
+  const dadosGrafico = resumo?.gastosPorCategoria?.map((item, index) => ({
+    value: item.total,
+    color: coresGrafico[index % coresGrafico.length],
+    text: `${item.total}`,
+    focused: categoriaFiltroGrafico === item.categoria,
+    onPress: () => {
+      if (categoriaFiltroGrafico === item.categoria) {
+        setCategoriaFiltroGrafico(null);
+      } else {
+        setCategoriaFiltroGrafico(item.categoria);
+      }
+    },
+  })) || [];
+
+  const transacoesFiltradas = categoriaFiltroGrafico
+    ? transacoes.filter(t => t.descricao.toLowerCase().includes(categoriaFiltroGrafico.toLowerCase()))
+    : transacoes;
 
   return (
     <KeyboardAvoidingView 
@@ -155,6 +216,56 @@ export default function HomeScreen() {
             </View>
           </View>
         </View>
+
+        {/* Bloco Analítico: Comparação e Gráfico de Rosca */}
+        {resumo && (
+          <View style={styles.cardAnalitico}>
+            <Text style={styles.cardAnaliticoTitulo}>Análise Mensal</Text>
+            
+            {/* Comparativo com mês anterior */}
+            <Text style={styles.textoComparativo}>
+              {resumo.diferencaDespesas <= 0
+                ? `💡 As despesas diminuíram R$ ${Math.abs(resumo.diferencaDespesas).toFixed(2)} em relação ao mês anterior.`
+                : `⚠️ As despesas aumentaram R$ ${resumo.diferencaDespesas.toFixed(2)} em relação ao mês anterior.`}
+            </Text>
+
+            {/* Gráfico de Rosca Interativo */}
+            {dadosGrafico.length > 0 ? (
+              <View style={styles.containerGrafico}>
+                <PieChart
+                  data={dadosGrafico}
+                  donut
+                  radius={90}
+                  innerRadius={60}
+                  innerCircleColor={'#1E293B'}
+                  centerLabelComponent={() => (
+                    <View style={{ alignItems: 'center' }}>
+                      <Text style={{ color: '#94A3B8', fontSize: 11 }}>
+                        {categoriaFiltroGrafico ? categoriaFiltroGrafico : 'Total'}
+                      </Text>
+                      <Text style={{ color: '#F8FAFC', fontWeight: 'bold', fontSize: 13 }}>
+                        R$ {categoriaFiltroGrafico 
+                          ? (resumo.gastosPorCategoria.find(c => c.categoria === categoriaFiltroGrafico)?.total.toFixed(2) || '0.00')
+                          : (resumo.despesas?.toFixed(2) || '0.00')}
+                      </Text>
+                    </View>
+                  )}
+                />
+
+                {categoriaFiltroGrafico && (
+                  <TouchableOpacity 
+                    onPress={() => setCategoriaFiltroGrafico(null)}
+                    style={styles.btnLimparFiltro}
+                  >
+                    <Text style={styles.btnLimparFiltroTxt}>✕ Limpar filtro: {categoriaFiltroGrafico}</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            ) : (
+              <Text style={styles.textoVazio}>Sem despesas registadas este mês.</Text>
+            )}
+          </View>
+        )}
 
         {/* Formulário */}
         <View style={styles.formContainer}>
@@ -188,14 +299,22 @@ export default function HomeScreen() {
           <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.catScroll}>
             {categorias.map((item) => (
               <TouchableOpacity
-                key={item}
-                style={[styles.catTag, categoriaSelecionada === item && styles.catTagAtiva]}
+                key={item.id}
+                style={[
+                  styles.catTag,
+                  categoriaSelecionada?.id === item.id && styles.catTagAtiva,
+                ]}
                 onPress={() => setCategoriaSelecionada(item)}
-              >
-                <Text style={[styles.catTxt, categoriaSelecionada === item && styles.catTxtAtivo]}>
-                  {item}
-                </Text>
-              </TouchableOpacity>
+                >
+                  <Text
+                    style={[
+                      styles.catTxt,
+                      categoriaSelecionada?.id === item.id && styles.catTxtAtivo,
+                    ]}
+                    >
+                      {item.nome}
+                      </Text>
+                </TouchableOpacity>
             ))}
           </ScrollView>
 
@@ -239,10 +358,10 @@ export default function HomeScreen() {
 
         {loading ? (
           <ActivityIndicator color="#38BDF8" style={{ marginTop: 20 }} />
-        ) : transacoes.length === 0 ? (
+        ) : transacoesFiltradas.length === 0 ? (
           <Text style={styles.emptyTxt}>Nenhum registo encontrado.</Text>
         ) : (
-          transacoes.slice().reverse().map((item, index) => (
+          transacoesFiltradas.slice().reverse().map((item, index) => (
             <View key={item.id ?? index} style={styles.itemCard}>
               <Text style={styles.itemDesc}>{item.descricao}</Text>
               <Text style={[
@@ -542,5 +661,47 @@ const styles = StyleSheet.create({
   modalBtnTxt: {
     color: '#FFFFFF',
     fontSize: 14,
+  },
+
+  cardAnalitico: {
+    backgroundColor: '#1E293B',
+    borderRadius: 16,
+    padding: 16,
+    marginVertical: 12,
+  },
+  cardAnaliticoTitulo: {
+    color: '#F8FAFC',
+    fontSize: 16,
+    fontWeight: 'bold',
+    marginBottom: 8,
+  },
+  textoComparativo: {
+    color: '#94A3B8',
+    fontSize: 13,
+    lineHeight: 18,
+    marginBottom: 16,
+  },
+  containerGrafico: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginVertical: 8,
+  },
+  btnLimparFiltro: {
+    marginTop: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    backgroundColor: '#334155',
+    borderRadius: 20,
+  },
+  btnLimparFiltroTxt: {
+    color: '#38BDF8',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  textoVazio: {
+    color: '#64748B',
+    textAlign: 'center',
+    fontStyle: 'italic',
+    marginVertical: 12,
   },
 });
