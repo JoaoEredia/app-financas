@@ -116,6 +116,39 @@ async function carregarDados() {
     }
   }
 
+  async function confirmarExclusaoCategoria(cat: CategoriaItem) {
+    Alert.alert(
+      'Excluir Categoria',
+      `Tem certeza de que deseja excluir "${cat.nome}"? Todas as transações vinculadas a ela também serão apagadas.`,
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        {
+          text: 'Excluir',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              setLoading(true);
+              await api.delete(`/categorias/${cat.id}`);
+
+              // Se a categoria deletada for a atualmente selecionada, limpa a seleção
+              if (categoriaSelecionada?.id === cat.id) {
+                setCategoriaSelecionada(null);
+              }
+
+              // Recarrega todos os dados (categorias, lançamentos e resumo)
+              await carregarDados();
+            } catch (err) {
+              console.log('Erro ao excluir categoria:', err);
+              Alert.alert('Erro', 'Não foi possível excluir a categoria.');
+            } finally {
+              setLoading(false);
+            }
+          },
+        },
+      ]
+    );
+  }
+
   async function handleSalvar() {
     if (!descricao.trim()) {
       Alert.alert('Aviso', 'Preencha a descrição do lançamento.');
@@ -185,6 +218,24 @@ async function carregarDados() {
   const transacoesFiltradas = categoriaFiltroGrafico
     ? transacoes.filter(t => t.descricao.toLowerCase().includes(categoriaFiltroGrafico.toLowerCase()))
     : transacoes;
+
+  // 1. Maior gasto individual
+  const listaDespesas = transacoes.filter((t) => t.tipo === 'DESPESA');
+  const maiorGastoIndividual = listaDespesas.length > 0
+    ? listaDespesas.reduce((max, t) => (Number(t.valor) > Number(max.valor) ? t : max), listaDespesas[0])
+    : null;
+
+  // 2. Categoria com maior gasto acumulado
+  const categoriaTop = (resumo?.gastosPorCategoria && resumo.gastosPorCategoria.length > 0)
+    ? [...resumo.gastosPorCategoria].sort((a, b) => b.total - a.total)[0]
+    : null;
+
+  // 3. Economia do mês (reaproveitando o seu saldoTotal já calculado)
+  const economiaMes = saldoTotal;
+
+  // 4. Média diária de gastos
+  const diaAtual = new Date().getDate();
+  const mediaDiaria = diaAtual > 0 ? (totalDespesas / diaAtual) : 0;
 
   return (
     <KeyboardAvoidingView 
@@ -264,6 +315,47 @@ async function carregarDados() {
             ) : (
               <Text style={styles.textoVazio}>Sem despesas registadas este mês.</Text>
             )}
+            {/* Destaque da Maior Categoria */}
+          {categoriaTop && (
+            <View style={styles.topCategoriaBadge}>
+              <Text style={styles.topCategoriaText}>
+                🔥 Maior impacto: <Text style={{ fontWeight: 'bold', color: '#60a5fa' }}>{categoriaTop.categoria}</Text> (R$ {categoriaTop.total.toFixed(2)})
+              </Text>
+            </View>
+          )}
+
+          {/* Grid de Métricas: Maior Gasto Individual, Economia do Mês e Média Diária */}
+          <View style={styles.metricsRow}>
+            <View style={styles.metricItem}>
+              <Text style={styles.metricLabel}>Maior Gasto</Text>
+              <Text style={styles.metricValue}>
+                R$ {maiorGastoIndividual ? Number(maiorGastoIndividual.valor).toFixed(2) : '0.00'}
+              </Text>
+              {maiorGastoIndividual?.descricao ? (
+                <Text style={styles.metricSubtext} numberOfLines={1}>
+                  {maiorGastoIndividual.descricao}
+                </Text>
+              ) : null}
+            </View>
+
+            <View style={[styles.metricItem, styles.metricBorder]}>
+              <Text style={styles.metricLabel}>Economia</Text>
+              <Text style={[styles.metricValue, { color: economiaMes >= 0 ? '#34d399' : '#f87171' }]}>
+                R$ {economiaMes.toFixed(2)}
+              </Text>
+              <Text style={styles.metricSubtext}>
+                {economiaMes >= 0 ? 'Poupado' : 'Défice'}
+              </Text>
+            </View>
+
+            <View style={styles.metricItem}>
+              <Text style={styles.metricLabel}>Média / dia</Text>
+              <Text style={styles.metricValue}>
+                R$ {mediaDiaria.toFixed(2)}
+              </Text>
+              <Text style={styles.metricSubtext}>no mês</Text>
+            </View>
+          </View>
           </View>
         )}
 
@@ -299,22 +391,24 @@ async function carregarDados() {
           <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.catScroll}>
             {categorias.map((item) => (
               <TouchableOpacity
-                key={item.id}
-                style={[
-                  styles.catTag,
-                  categoriaSelecionada?.id === item.id && styles.catTagAtiva,
-                ]}
-                onPress={() => setCategoriaSelecionada(item)}
-                >
-                  <Text
-                    style={[
-                      styles.catTxt,
-                      categoriaSelecionada?.id === item.id && styles.catTxtAtivo,
-                    ]}
-                    >
-                      {item.nome}
-                      </Text>
-                </TouchableOpacity>
+            key={item.id}
+            style={[
+              styles.catTag,
+              categoriaSelecionada?.id === item.id && styles.catTagAtiva,
+            ]}
+            onPress={() => setCategoriaSelecionada(item)}
+            onLongPress={() => confirmarExclusaoCategoria(item)}
+            delayLongPress={500}
+          >
+            <Text
+              style={[
+                styles.catTxt,
+                categoriaSelecionada?.id === item.id && styles.catTxtAtivo,
+              ]}
+            >
+              {item.nome}
+            </Text>
+          </TouchableOpacity>
             ))}
           </ScrollView>
 
@@ -703,5 +797,56 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     fontStyle: 'italic',
     marginVertical: 12,
+  },
+  topCategoriaBadge: {
+    marginTop: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    backgroundColor: '#0f172a',
+    borderRadius: 8,
+    alignSelf: 'center',
+  },
+  topCategoriaText: {
+    color: '#94a3b8',
+    fontSize: 12,
+  },
+  metricsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginTop: 16,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#1e293b',
+  },
+  metricItem: {
+    flex: 1,
+    alignItems: 'center',
+    paddingHorizontal: 4,
+  },
+  metricBorder: {
+    borderLeftWidth: 1,
+    borderRightWidth: 1,
+    borderColor: '#1e293b',
+  },
+  metricLabel: {
+    color: '#64748b',
+    fontSize: 10,
+    textTransform: 'uppercase',
+    fontWeight: '600',
+    letterSpacing: 0.5,
+    marginBottom: 4,
+  },
+  metricValue: {
+    color: '#f8fafc',
+    fontSize: 13,
+    fontWeight: 'bold',
+  },
+  metricSubtext: {
+    color: '#64748b',
+    fontSize: 10,
+    marginTop: 2,
   },
 });
